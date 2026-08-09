@@ -1,0 +1,11 @@
+# Bicep build artifacts
+*.json
+!**/*.bicepparam
+patterns/**/main.json
+patterns/**/*.parameters.json
+
+# Secrets
+*.tfvars
+*.auto.tfvars
+backend.hcl
+.env
