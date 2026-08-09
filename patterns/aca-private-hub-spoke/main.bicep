@@ -1,15 +1,22 @@
 // main.bicep — Hub-and-spoke ACA private pattern (SINGLE FILE + one tiny DNS module).
 //
-//   HUB          vnet-hub-<prefix>        10.0.0.0/16  (Azure Firewall Basic)
-//   SPOKE 1 ACA  vnet-spoke-aca-<prefix>  10.1.0.0/16  (internal ACA env + app1)
+//   HUB           vnet-hub-<prefix>         10.0.0.0/16  (Azure Firewall Basic)
+//   SPOKE 1 ACA   vnet-spoke-aca-<prefix>   10.1.0.0/16  (internal ACA env + app1..app4)
+//   SPOKE 2 MGMT  vnet-spoke-mgmt-<prefix>  10.3.0.0/16  (Windows 11 test/jump VM)
 //
-// Name resolution is done with AZURE PRIVATE DNS ZONES (no BIND VM):
-//   * customer.com               — authoritative "customer" zone, A app1 -> ACA static IP
-//   * <acaEnv.defaultDomain>     — ACA default-domain zone, wildcard -> ACA static IP
-// Both zones are linked to EVERY VNet (hub + ACA spoke), so Azure platform DNS
-// (168.63.129.16) resolves them automatically for any workload in either VNet.
+// FOUR internal sample apps run in one ACA environment. Internal apps in a single env
+// share the env static IP; each app has its own internal ingress and is reachable by
+// its own host (appN.customer.com), with the ACA ingress routing by Host header.
 //
-// Spoke egress + spoke-to-hub traffic is forced through the hub firewall via a UDR.
+// Name resolution uses AZURE PRIVATE DNS ZONES (no DNS server VM):
+//   * customer.com            — A app1..app4 -> ACA env static IP (host-based routing)
+//   * <acaEnv.defaultDomain>  — wildcard -> ACA env static IP
+// Both zones are linked to EVERY VNet (hub + ACA spoke + mgmt spoke), so Azure
+// platform DNS (168.63.129.16) resolves them for any workload in the topology.
+//
+// Spoke egress is forced through the hub firewall via UDRs. The Windows 11 VM in the
+// mgmt spoke has NO public IP; RDP is published through an Azure Firewall DNAT rule
+// (firewall data public IP :3389 -> VM 10.3.0.4:3389).
 targetScope = 'resourceGroup'
 
 // ===========================================================================
@@ -41,6 +48,16 @@ param acaSubnetPrefix string = '10.1.0.0/23'
 @description('Private endpoint / utility subnet prefix.')
 param peSubnetPrefix string = '10.1.2.0/24'
 
+// --- MGMT spoke networking ---
+@description('Management spoke VNet address space (Windows 11 test VM).')
+param mgmtSpokeAddressSpace string = '10.3.0.0/16'
+
+@description('Management subnet prefix.')
+param mgmtSubnetPrefix string = '10.3.0.0/24'
+
+@description('Static private IP for the Windows 11 VM.')
+param win11PrivateIp string = '10.3.0.4'
+
 @description('Address space(s) considered "internal" for the lab firewall rules.')
 param internalCidr string = '10.0.0.0/8'
 
@@ -57,11 +74,16 @@ param workloadMinCount int = 1
 @description('Max nodes for the dedicated profile.')
 param workloadMaxCount int = 3
 
-// --- Container app ---
-@description('Container app name / customer record host (app1 -> app1.customer.com).')
-param appName string = 'app1'
+// --- Sample container apps ---
+@description('Names of the sample apps. Each becomes an app + appN.customer.com record.')
+param appNames array = [
+  'app1'
+  'app2'
+  'app3'
+  'app4'
+]
 
-@description('Container image.')
+@description('Container image used for every sample app.')
 param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
 @description('Container target port.')
@@ -77,8 +99,23 @@ param memory string = '1Gi'
 @description('Emulated customer domain (Azure Private DNS zone).')
 param customerDomain string = 'customer.com'
 
-@description('Customer A record host label.')
-param customerRecordName string = 'app1'
+// --- Windows 11 test VM ---
+@description('Windows 11 VM name (<= 15 chars for computerName).')
+@maxLength(15)
+param win11VmName string = 'vm-win11-test'
+
+@description('Windows 11 VM size.')
+param win11VmSize string = 'Standard_D2s_v5'
+
+@description('Windows 11 VM admin username.')
+param adminUsername string = 'azureadmin'
+
+@description('Windows 11 VM admin password.')
+@secure()
+param adminPassword string
+
+@description('Windows 11 marketplace image SKU (e.g. win11-23h2-pro, win11-24h2-pro).')
+param win11ImageSku string = 'win11-23h2-pro'
 
 @description('Log Analytics retention in days.')
 param lawRetentionInDays int = 30
@@ -173,6 +210,7 @@ resource fwPolicy 'Microsoft.Network/firewallPolicies@2023-11-01' = {
 //   * ACA can still pull container images over http/https
 //   * intra-lab traffic (routed via the firewall) is allowed
 //   * DNS (53) is explicitly permitted for Azure platform DNS
+//   * a DNAT rule publishes RDP (3389) to the Windows 11 VM
 // Tighten targetFqdns / destinationAddresses / ports before any real use.
 resource fwRcg 'Microsoft.Network/firewallPolicies/ruleCollectionGroups@2023-11-01' = {
   parent: fwPolicy
@@ -180,6 +218,37 @@ resource fwRcg 'Microsoft.Network/firewallPolicies/ruleCollectionGroups@2023-11-
   properties: {
     priority: 200
     ruleCollections: [
+      {
+        // DNAT: publish RDP to the Windows 11 test VM via the firewall data PIP.
+        ruleCollectionType: 'FirewallPolicyNatRuleCollection'
+        name: 'dnat-rdp-win11'
+        priority: 100
+        action: {
+          type: 'Dnat'
+        }
+        rules: [
+          {
+            ruleType: 'NatRule'
+            name: 'rdp-to-win11'
+            ipProtocols: [
+              'TCP'
+            ]
+            // Open source (VM is only reachable through this DNAT, never directly).
+            sourceAddresses: [
+              '*'
+            ]
+            // Firewall data public IP address (translated destination is the VM).
+            destinationAddresses: [
+              dataPip.properties.ipAddress
+            ]
+            destinationPorts: [
+              '3389'
+            ]
+            translatedAddress: win11PrivateIp
+            translatedPort: '3389'
+          }
+        ]
+      }
       {
         ruleCollectionType: 'FirewallPolicyFilterRuleCollection'
         name: 'app-allow-web'
@@ -219,7 +288,7 @@ resource fwRcg 'Microsoft.Network/firewallPolicies/ruleCollectionGroups@2023-11-
         }
         rules: [
           {
-            // Intra-lab: allow everything between the private ranges (hub<->spoke).
+            // Intra-lab: allow everything between the private ranges (hub<->spokes, spoke<->spoke).
             ruleType: 'NetworkRule'
             name: 'allow-intra-vnet'
             ipProtocols: [
@@ -324,12 +393,42 @@ resource firewall 'Microsoft.Network/azureFirewalls@2023-11-01' = {
 var firewallPrivateIp = firewall.properties.ipConfigurations[0].properties.privateIPAddress
 
 // ===========================================================================
-// Route table — force ACA spoke egress through the firewall.
+// Route tables — force spoke egress through the firewall.
 //   0.0.0.0/0        -> VirtualAppliance (firewall private IP)
 //   168.63.129.16/32 -> Internet (keep Azure platform DNS / WireServer direct)
 // ===========================================================================
 resource acaRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
   name: 'vnet-spoke-aca-${namePrefix}-rt'
+  location: location
+  properties: {
+    disableBgpRoutePropagation: true
+    routes: [
+      {
+        name: 'default-to-firewall'
+        properties: {
+          addressPrefix: '0.0.0.0/0'
+          nextHopType: 'VirtualAppliance'
+          nextHopIpAddress: firewallPrivateIp
+        }
+      }
+      {
+        name: 'azure-platform-dns-direct'
+        properties: {
+          addressPrefix: '168.63.129.16/32'
+          nextHopType: 'Internet'
+        }
+      }
+    ]
+  }
+}
+
+// MGMT spoke UDR: keep the DNAT return path symmetric.
+//   Force default egress to the firewall BUT keep the AzureFirewallSubnet reachable
+//   directly (168.63.129.16 direct as usual). This preserves the RDP DNAT return path
+//   because inbound RDP arrives from the firewall's private IP inside the hub, which is
+//   part of internalCidr and reachable via the peering, not the 0.0.0.0/0 route.
+resource mgmtRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
+  name: 'vnet-spoke-mgmt-${namePrefix}-rt'
   location: location
   properties: {
     disableBgpRoutePropagation: true
@@ -403,7 +502,36 @@ resource acaSpokeVnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
 }
 
 // ===========================================================================
-// PEERINGS — bidirectional hub<->spoke-aca
+// SPOKE 2 — MGMT (Windows 11 test VM)
+//   snet-mgmt only. VNet DNS left default so the linked Private DNS zones resolve
+//   appN.customer.com from the VM. Egress forced through the firewall via UDR.
+// ===========================================================================
+resource mgmtSpokeVnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
+  name: 'vnet-spoke-mgmt-${namePrefix}'
+  location: location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        mgmtSpokeAddressSpace
+      ]
+    }
+    subnets: [
+      {
+        name: 'snet-mgmt'
+        properties: {
+          addressPrefix: mgmtSubnetPrefix
+          routeTable: {
+            id: mgmtRouteTable.id
+          }
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+    ]
+  }
+}
+
+// ===========================================================================
+// PEERINGS — bidirectional hub<->spoke-aca and hub<->spoke-mgmt
 //   allowForwardedTraffic: true so hub firewall transit works.
 // ===========================================================================
 resource peerHubToAca 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2023-11-01' = {
@@ -434,8 +562,36 @@ resource peerAcaToHub 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@
   }
 }
 
+resource peerHubToMgmt 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2023-11-01' = {
+  parent: hubVnet
+  name: 'hub-to-spoke-mgmt'
+  properties: {
+    allowVirtualNetworkAccess: true
+    allowForwardedTraffic: true
+    allowGatewayTransit: false
+    useRemoteGateways: false
+    remoteVirtualNetwork: {
+      id: mgmtSpokeVnet.id
+    }
+  }
+}
+
+resource peerMgmtToHub 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2023-11-01' = {
+  parent: mgmtSpokeVnet
+  name: 'spoke-mgmt-to-hub'
+  properties: {
+    allowVirtualNetworkAccess: true
+    allowForwardedTraffic: true
+    allowGatewayTransit: false
+    useRemoteGateways: false
+    remoteVirtualNetwork: {
+      id: hubVnet.id
+    }
+  }
+}
+
 // ===========================================================================
-// ACA managed environment (internal) + container app — in the ACA spoke
+// ACA managed environment (internal) + FOUR container apps — in the ACA spoke
 // ===========================================================================
 resource acaEnv 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
   name: 'cae-${namePrefix}'
@@ -462,7 +618,7 @@ resource acaEnv 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
         name: 'Consumption'
         workloadProfileType: 'Consumption'
       }
-      // The dedicated profile the app actually runs on.
+      // The dedicated profile the apps actually run on.
       {
         name: workloadProfileName
         workloadProfileType: workloadProfileType
@@ -473,70 +629,81 @@ resource acaEnv 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
   }
 }
 
-resource app 'Microsoft.App/containerApps@2024-03-01' = {
-  name: appName
-  location: location
-  properties: {
-    managedEnvironmentId: acaEnv.id
-    // Run on the dedicated workload profile, not Consumption.
-    workloadProfileName: workloadProfileName
-    configuration: {
-      ingress: {
-        // Private: internal ingress only — reachable only inside the VNet.
-        external: false
-        targetPort: targetPort
-        transport: 'auto'
-        allowInsecure: false
-        traffic: [
+// Four sample apps, each with internal ingress on the dedicated profile.
+resource apps 'Microsoft.App/containerApps@2024-03-01' = [
+  for name in appNames: {
+    name: name
+    location: location
+    properties: {
+      managedEnvironmentId: acaEnv.id
+      workloadProfileName: workloadProfileName
+      configuration: {
+        ingress: {
+          // Private: internal ingress only — reachable only inside the VNet mesh.
+          external: false
+          targetPort: targetPort
+          transport: 'auto'
+          allowInsecure: false
+          traffic: [
+            {
+              latestRevision: true
+              weight: 100
+            }
+          ]
+        }
+      }
+      template: {
+        containers: [
           {
-            latestRevision: true
-            weight: 100
+            name: name
+            image: containerImage
+            resources: {
+              cpu: json(cpu)
+              memory: memory
+            }
+            env: [
+              {
+                // Simple way to tell the four apps apart in the quickstart image.
+                name: 'APP_NAME'
+                value: name
+              }
+            ]
           }
         ]
-      }
-    }
-    template: {
-      containers: [
-        {
-          name: appName
-          image: containerImage
-          resources: {
-            cpu: json(cpu)
-            memory: memory
-          }
+        scale: {
+          minReplicas: 1
+          maxReplicas: 3
         }
-      ]
-      scale: {
-        minReplicas: 1
-        maxReplicas: 3
       }
     }
   }
-}
+]
 
 // ===========================================================================
 // Azure PRIVATE DNS — customer.com "customer" zone
-//   Authoritative for the emulated customer domain. A app1 -> ACA env static IP.
-//   Linked to EVERY VNet (hub + ACA spoke) so Azure platform DNS resolves it.
-//   The record name is a static value, so this can live inline in main.bicep.
+//   Authoritative for the emulated customer domain. One A record per sample app
+//   (app1..app4) -> the shared ACA env static IP; ACA ingress routes by Host header.
+//   Linked to EVERY VNet (hub + ACA spoke + mgmt spoke) so Azure platform DNS resolves it.
 // ===========================================================================
 resource customerZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
   name: customerDomain
   location: 'global'
 }
 
-resource customerRecord 'Microsoft.Network/privateDnsZones/A@2020-06-01' = {
-  parent: customerZone
-  name: customerRecordName
-  properties: {
-    ttl: 300
-    aRecords: [
-      {
-        ipv4Address: acaEnv.properties.staticIp
-      }
-    ]
+resource customerRecords 'Microsoft.Network/privateDnsZones/A@2020-06-01' = [
+  for name in appNames: {
+    parent: customerZone
+    name: name
+    properties: {
+      ttl: 300
+      aRecords: [
+        {
+          ipv4Address: acaEnv.properties.staticIp
+        }
+      ]
+    }
   }
-}
+]
 
 resource customerZoneLinkHub 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
   parent: customerZone
@@ -562,6 +729,18 @@ resource customerZoneLinkAca 'Microsoft.Network/privateDnsZones/virtualNetworkLi
   }
 }
 
+resource customerZoneLinkMgmt 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: customerZone
+  name: 'link-spoke-mgmt'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: mgmtSpokeVnet.id
+    }
+  }
+}
+
 // ===========================================================================
 // Azure PRIVATE DNS — ACA default-domain zone linked to every VNet
 //   Kept in a small module because a private DNS zone name must be known at the
@@ -576,7 +755,68 @@ module dns 'modules/dns.bicep' = {
     vnetIds: [
       hubVnet.id
       acaSpokeVnet.id
+      mgmtSpokeVnet.id
     ]
+  }
+}
+
+// ===========================================================================
+// Windows 11 test VM — in the MGMT spoke. NO public IP.
+//   RDP is reached ONLY through the firewall DNAT rule (dataPip:3389 -> VM:3389).
+// ===========================================================================
+resource win11Nic 'Microsoft.Network/networkInterfaces@2023-11-01' = {
+  name: '${win11VmName}-nic'
+  location: location
+  properties: {
+    ipConfigurations: [
+      {
+        name: 'ipconfig1'
+        properties: {
+          subnet: {
+            id: mgmtSpokeVnet.properties.subnets[0].id
+          }
+          privateIPAllocationMethod: 'Static'
+          privateIPAddress: win11PrivateIp
+          // No publicIPAddress — reachable only via the firewall DNAT rule.
+        }
+      }
+    ]
+  }
+}
+
+resource win11Vm 'Microsoft.Compute/virtualMachines@2024-03-01' = {
+  name: win11VmName
+  location: location
+  properties: {
+    hardwareProfile: {
+      vmSize: win11VmSize
+    }
+    osProfile: {
+      computerName: win11VmName
+      adminUsername: adminUsername
+      adminPassword: adminPassword
+    }
+    storageProfile: {
+      imageReference: {
+        publisher: 'MicrosoftWindowsDesktop'
+        offer: 'windows-11'
+        sku: win11ImageSku
+        version: 'latest'
+      }
+      osDisk: {
+        createOption: 'FromImage'
+        managedDisk: {
+          storageAccountType: 'Premium_LRS'
+        }
+      }
+    }
+    networkProfile: {
+      networkInterfaces: [
+        {
+          id: win11Nic.id
+        }
+      ]
+    }
   }
 }
 
@@ -584,8 +824,11 @@ module dns 'modules/dns.bicep' = {
 // Outputs
 // ===========================================================================
 output firewallPrivateIp string = firewallPrivateIp
+output firewallPublicIp string = dataPip.properties.ipAddress
 output envDefaultDomain string = acaEnv.properties.defaultDomain
 output envStaticIp string = acaEnv.properties.staticIp
-output appInternalFqdn string = app.properties.configuration.ingress.fqdn
-output customerFqdn string = '${customerRecordName}.${customerDomain}'
-output note string = 'Hub-and-spoke. ${customerRecordName}.${customerDomain} resolves via the Azure Private DNS zone (linked to hub + ACA spoke) to the ACA env static IP ${acaEnv.properties.staticIp}. Spoke egress transits the Azure Firewall (${firewallPrivateIp}).'
+output appFqdns array = [for name in appNames: '${name}.${customerDomain}']
+output appInternalFqdns array = [for (name, i) in appNames: apps[i].properties.configuration.ingress.fqdn]
+output win11PrivateIp string = win11PrivateIp
+output rdpConnect string = 'Connect RDP to ${dataPip.properties.ipAddress}:3389 (DNAT -> ${win11PrivateIp}:3389). From the VM, browse http://app1.${customerDomain} .. http://app4.${customerDomain}.'
+output note string = 'Four internal apps resolve via customer.com (linked to hub + ACA + mgmt spokes) to ACA env static IP ${acaEnv.properties.staticIp}. Windows 11 VM has no public IP; RDP is published through the Azure Firewall DNAT rule on ${dataPip.properties.ipAddress}:3389.'
