@@ -98,7 +98,10 @@ No DNS server VM — resolution is entirely **Azure Private DNS**:
 Each spoke subnet carries a UDR:
 
 - `0.0.0.0/0` → **VirtualAppliance** (firewall private IP) — all egress via the firewall
-- `168.63.129.16/32` → **Internet** — keep Azure platform DNS / WireServer direct
+
+> Note: an explicit `168.63.129.16/32` route is **not** added — Azure rejects user routes into
+> that restricted range (`AddressPrefixInRestrictedAddressSpace`). Azure platform DNS / WireServer
+> is reached via the built-in implicit system route, so DNS resolution still works.
 
 ## Firewall rules — INTENTIONALLY BROAD (lab)
 

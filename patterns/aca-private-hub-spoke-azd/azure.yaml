@@ -13,21 +13,25 @@ services:
     host: containerapp
     docker:
       path: ./Dockerfile
+      remoteBuild: true
   app2:
     project: ./src/app2
     language: docker
     host: containerapp
     docker:
       path: ./Dockerfile
+      remoteBuild: true
   app3:
     project: ./src/app3
     language: docker
     host: containerapp
     docker:
       path: ./Dockerfile
+      remoteBuild: true
   app4:
     project: ./src/app4
     language: docker
     host: containerapp
     docker:
       path: ./Dockerfile
+      remoteBuild: true
