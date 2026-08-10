@@ -102,6 +102,16 @@ param memory string = '1Gi'
 @description('Emulated customer domain (Azure Private DNS zone).')
 param customerDomain string = 'customer.com'
 
+// --- Custom DNS suffix + wildcard TLS (Key Vault) ---
+@description('Enable the ACA env custom DNS suffix + wildcard TLS from Key Vault. Requires the wildcard cert to already be imported into the vault (see README cert-prep step).')
+param enableCustomDnsSuffix bool = false
+
+@description('Globally-unique Key Vault name (RBAC) that holds the wildcard cert.')
+param keyVaultName string = 'kv${namePrefix}${take(uniqueString(resourceGroup().id), 8)}'
+
+@description('Certificate/secret name for the wildcard cert inside the vault.')
+param wildcardCertName string = 'wildcard-customer-com'
+
 // --- Windows 11 test VM ---
 @description('Windows 11 VM name (<= 15 chars for computerName).')
 @maxLength(15)
@@ -617,9 +627,68 @@ resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+// ===========================================================================
+// Key Vault (RBAC) for the wildcard TLS certificate  [optional]
+//   The ACA env pulls the *.<customerDomain> cert from here via the user-assigned
+//   MI to serve the custom DNS suffix over TLS. KEYS-DISABLED TENANT: RBAC only,
+//   no access policies; the MI gets Secrets User + Certificate User.
+//   NOTE: Bicep cannot generate a PFX. Import the wildcard cert into this vault
+//   BEFORE (or out-of-band from) this deployment — see the README cert-prep step.
+// ===========================================================================
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = if (enableCustomDnsSuffix) {
+  name: keyVaultName
+  location: location
+  tags: {
+    // Survive the tenant policy that auto-disables public network access.
+    SecurityControl: 'Ignore'
+  }
+  properties: {
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    tenantId: subscription().tenantId
+    enableRbacAuthorization: true
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+// MI -> Key Vault Secrets User (read the cert secret for the TLS binding).
+resource kvSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableCustomDnsSuffix) {
+  name: guid(keyVault.id, acaIdentity.id, 'KeyVaultSecretsUser')
+  scope: keyVault
+  properties: {
+    principalId: acaIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    // Key Vault Secrets User.
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+  }
+}
+
+// MI -> Key Vault Certificate User.
+resource kvCertUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableCustomDnsSuffix) {
+  name: guid(keyVault.id, acaIdentity.id, 'KeyVaultCertificateUser')
+  scope: keyVault
+  properties: {
+    principalId: acaIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    // Key Vault Certificate User.
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'db79e9a7-68ee-4b58-9aeb-b90e7c24fcba')
+  }
+}
+
+var wildcardCertSecretUrl = enableCustomDnsSuffix ? '${keyVault!.properties.vaultUri}secrets/${wildcardCertName}' : ''
+
 resource acaEnv 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
   name: 'cae-${namePrefix}'
   location: location
+  // The env needs the user-assigned MI so it can read the wildcard cert from KV.
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${acaIdentity.id}': {}
+    }
+  }
   properties: {
     appLogsConfiguration: {
       destination: 'log-analytics'
@@ -635,6 +704,15 @@ resource acaEnv 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
     }
     // Private: no public control/data plane access.
     publicNetworkAccess: 'Disabled'
+    // Custom DNS suffix + wildcard TLS (optional). When enabled, the env serves
+    // *.<customerDomain> using the cert pulled from Key Vault via the MI.
+    customDomainConfiguration: enableCustomDnsSuffix ? {
+      dnsSuffix: customerDomain
+      certificateKeyVaultProperties: {
+        identity: acaIdentity.id
+        keyVaultUrl: wildcardCertSecretUrl
+      }
+    } : null
     zoneRedundant: false
     workloadProfiles: [
       // Consumption profile is always present as the default baseline.
@@ -651,6 +729,11 @@ resource acaEnv 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
       }
     ]
   }
+  // Ensure the MI can read the KV cert before the env tries to bind it.
+  dependsOn: enableCustomDnsSuffix ? [
+    kvSecretsUser
+    kvCertUser
+  ] : []
 }
 
 // Four sample apps, each with internal ingress on the dedicated profile.
@@ -751,6 +834,22 @@ resource customerRecords 'Microsoft.Network/privateDnsZones/A@2020-06-01' = [
     }
   }
 ]
+
+// Wildcard record for the custom DNS suffix: *.<customerDomain> -> env static IP.
+//   This is what makes appN.<customerDomain> (and any other host) resolve to the
+//   internal ingress when the custom DNS suffix + wildcard TLS are enabled.
+resource wildcardRecord 'Microsoft.Network/privateDnsZones/A@2020-06-01' = if (enableCustomDnsSuffix) {
+  parent: customerZone
+  name: '*'
+  properties: {
+    ttl: 300
+    aRecords: [
+      {
+        ipv4Address: acaEnv.properties.staticIp
+      }
+    ]
+  }
+}
 
 resource customerZoneLinkHub 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
   parent: customerZone
@@ -878,6 +977,10 @@ output envDefaultDomain string = acaEnv.properties.defaultDomain
 output envStaticIp string = acaEnv.properties.staticIp
 output appFqdns array = [for name in appNames: '${name}.${customerDomain}']
 output appInternalFqdns array = [for (name, i) in appNames: apps[i].properties.configuration.ingress.fqdn]
+output keyVaultName string = enableCustomDnsSuffix ? keyVault!.name : ''
+output keyVaultUri string = enableCustomDnsSuffix ? keyVault!.properties.vaultUri : ''
+output customDnsSuffix string = enableCustomDnsSuffix ? customerDomain : ''
+output wildcardHttpsExample string = enableCustomDnsSuffix ? 'https://app1.${customerDomain}' : ''
 output win11PrivateIp string = win11PrivateIp
 output rdpConnect string = 'Connect RDP to ${dataPip.properties.ipAddress}:3389 (DNAT -> ${win11PrivateIp}:3389). From the VM, browse http://app1.${customerDomain} .. http://app4.${customerDomain}.'
 output note string = 'Four internal apps resolve via customer.com (linked to hub + ACA + mgmt spokes) to ACA env static IP ${acaEnv.properties.staticIp}. Windows 11 VM has no public IP; RDP is published through the Azure Firewall DNAT rule on ${dataPip.properties.ipAddress}:3389.'

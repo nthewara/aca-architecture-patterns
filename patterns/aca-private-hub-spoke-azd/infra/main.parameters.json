@@ -13,6 +13,9 @@
     },
     "adminPassword": {
       "value": "${WIN11_ADMIN_PASSWORD}"
+    },
+    "enableCustomDnsSuffix": {
+      "value": "${ENABLE_CUSTOM_DNS_SUFFIX=false}"
     }
   }
 }
