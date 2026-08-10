@@ -119,23 +119,86 @@ Full details, routing, firewall rules, and parameters are in the
 
 ---
 
+## Pattern: ACA Private Hub-and-Spoke (azd)
+
+[`aca-private-hub-spoke-azd`](patterns/aca-private-hub-spoke-azd/) — the same private topology,
+packaged for **Azure Developer CLI**. One `azd up` provisions the infra **and** builds + deploys
+four real sample apps (`src/app1`–`app4`) to the private ACA environment. Adds **ACR (Standard)** +
+a **user-assigned managed identity with `AcrPull`** so images are pulled without registry passwords
+(safe for the keys-disabled tenant). Optionally enables a **custom DNS suffix + wildcard TLS from
+Key Vault** (`ENABLE_CUSTOM_DNS_SUFFIX=true`) so apps answer at `appN.customer.com` over HTTPS.
+
+```bash
+cd patterns/aca-private-hub-spoke-azd
+azd env new aca-priv && azd env set AZURE_LOCATION australiaeast
+export WIN11_ADMIN_PASSWORD="$(op read 'op://<vault>/<item>/password')"
+azd up
+```
+
+See the [pattern README](patterns/aca-private-hub-spoke-azd/README.md).
+
+---
+
+## Pattern: ACA Private Default-Domain (azd, no custom DNS / no cert)
+
+[`aca-private-default-domain-azd`](patterns/aca-private-default-domain-azd/) — same private
+topology + 4 apps + Windows 11 mgmt VM, but **deliberately without custom DNS or a custom
+certificate**. Apps are reached over the environment's **auto-generated
+`appN.<envDefaultDomain>.azurecontainerapps.io`** names, which the ACA platform serves with a
+**managed, publicly-trusted TLS certificate for free** — no browser warning, no cert lifecycle,
+no Key Vault. A single private DNS zone for the default domain is linked to all three VNets so the
+internal names resolve to the environment's private IP. This is the **simplest fully-private
+variant**.
+
+```bash
+cd patterns/aca-private-default-domain-azd
+azd env new aca-defdns && azd env set AZURE_LOCATION australiaeast
+export WIN11_ADMIN_PASSWORD="$(op read 'op://<vault>/<item>/password')"
+azd up
+```
+
+See the [pattern README](patterns/aca-private-default-domain-azd/README.md).
+
+---
+
 ## Repo structure
 
 ```
 aca-architecture-patterns/
-├── README.md                          # this file
+├── README.md                              # this file
 └── patterns/
-    └── aca-private-hub-spoke/
-        ├── README.md                  # pattern deep-dive
-        ├── main.bicep                 # hub + firewall (+DNAT) + ACA spoke (4 apps) + mgmt spoke (Win11 VM) + customer.com zone
-        ├── main.bicepparam            # default parameters
-        ├── modules/
-        │   └── dns.bicep              # ACA default-domain private zone (deferred name)
-        └── deploy.sh                  # RG-create + deploy wrapper
+    ├── aca-private-hub-spoke/             # Bicep-only, custom DNS + BIND-free wildcard cert
+    │   ├── README.md
+    │   ├── main.bicep                     # hub + firewall (+DNAT) + ACA spoke (4 apps) + mgmt spoke (Win11 VM) + customer.com zone
+    │   ├── main.bicepparam
+    │   ├── modules/dns.bicep              # ACA default-domain private zone (deferred name)
+    │   └── deploy.sh
+    ├── aca-private-hub-spoke-azd/         # azd: infra + app deploy, ACR + MI, optional custom DNS/TLS
+    │   ├── README.md
+    │   ├── azure.yaml                     # maps app1..app4 services -> container apps
+    │   ├── infra/                         # main.bicep (sub-scope) + resources.bicep + modules + params
+    │   ├── scripts/prep-wildcard-cert.sh  # one-time PFX generate + import (custom-DNS option)
+    │   └── src/app1..app4/                # real sample apps (Dockerfile + server.js)
+    └── aca-private-default-domain-azd/    # azd: NO custom DNS / NO cert, platform TLS on *.azurecontainerapps.io
+        ├── README.md
+        ├── azure.yaml
+        ├── infra/                         # main.bicep (sub-scope) + resources.bicep + modules + params
+        └── src/app1..app4/                # real sample apps (Dockerfile + server.js)
 ```
+
+## Choosing a pattern
+
+| If you want… | Use |
+|---|---|
+| Bicep-only, deploy with `az`/CI, friendly `customer.com` names | `aca-private-hub-spoke` |
+| `azd up` to ship real apps, friendly `customer.com` names + your own wildcard cert | `aca-private-hub-spoke-azd` (with `ENABLE_CUSTOM_DNS_SUFFIX=true`) |
+| `azd up`, simplest setup, trusted TLS out of the box, don't care about the long default URLs | `aca-private-default-domain-azd` |
+
+All three keep everything **private**: internal ACA env, no public app IPs, reached from the
+Windows 11 VM in the management spoke; the only public surface is the firewall.
 
 ## Contributing new patterns
 
-Drop a new folder under `patterns/<name>/` with its own `README.md`, Bicep, and `deploy.sh`,
-then add a row to the **Patterns** table above. Keep templates lab-safe: no committed secrets,
-`az bicep build` must pass clean.
+Drop a new folder under `patterns/<name>/` with its own `README.md` and Bicep (plus `azure.yaml` +
+`src/` if it's an azd pattern), then add a row to the **Patterns** table above. Keep templates
+lab-safe: no committed secrets, `az bicep build` must pass clean.
