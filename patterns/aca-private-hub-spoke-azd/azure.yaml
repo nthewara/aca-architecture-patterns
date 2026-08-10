@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: aca-private-hub-spoke-azd
+metadata:
+  template: aca-private-hub-spoke-azd@1.0.0
+
+# Four internal sample apps. Each maps to a Container App in infra/main.bicep
+# (matched by the "azd-service-name" tag). azd builds the Docker image, pushes
+# it to ACR, and updates the container app image on `azd up` / `azd deploy`.
+services:
+  app1:
+    project: ./src/app1
+    language: docker
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+  app2:
+    project: ./src/app2
+    language: docker
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+  app3:
+    project: ./src/app3
+    language: docker
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+  app4:
+    project: ./src/app4
+    language: docker
+    host: containerapp
+    docker:
+      path: ./Dockerfile

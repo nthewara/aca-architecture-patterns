@@ -1,11 +1,17 @@
-# Bicep build artifacts
-*.json
-!**/*.bicepparam
-patterns/**/main.json
-patterns/**/*.parameters.json
+# Bicep build artifacts (compiled ARM), but keep azd parameter files
+**/main.json
+patterns/**/resources.json
+patterns/**/modules/*.json
+
+# azd environment state — may contain resolved values; never commit
+.azure/
+
+# Node
+node_modules/
 
 # Secrets
 *.tfvars
 *.auto.tfvars
 backend.hcl
 .env
+!patterns/**/main.parameters.json
