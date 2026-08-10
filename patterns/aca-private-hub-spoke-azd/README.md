@@ -95,14 +95,57 @@ azd deploy            # all four
 azd deploy app2       # just app2
 ```
 
+## Custom DNS suffix + wildcard TLS (optional)
+
+The ACA environment can serve a **custom DNS suffix** (`customer.com`) with a **wildcard TLS
+certificate** (`*.customer.com`) pulled from **Key Vault** via the user-assigned managed identity.
+When enabled, the deployment adds:
+
+- a **Key Vault** (RBAC-only, tagged `SecurityControl=Ignore`) holding the wildcard cert,
+- **Key Vault Secrets User + Certificate User** role assignments for the MI,
+- the MI attached to the **ACA environment**,
+- the env `customDomainConfiguration` (`dnsSuffix` + `certificateKeyVaultProperties`),
+- a wildcard `*.customer.com` A-record → the env static IP.
+
+The apps then answer `https://app1.customer.com` … `https://app4.customer.com` on the internal
+ingress with the wildcard cert.
+
+### Cert-prep step (one-time, out-of-band)
+
+Bicep can't generate a PFX, so import the wildcard cert into the vault first. The vault name is
+derived as `kv<namePrefix><hash>`; the helper script also accepts an explicit name. Provision the
+vault once (it's created by the same template), then run:
+
+```bash
+# 1) First provision so the Key Vault exists (enable the feature):
+azd env set ENABLE_CUSTOM_DNS_SUFFIX true
+azd provision
+
+# 2) Import a wildcard cert into the vault (self-signed for the lab):
+./scripts/prep-wildcard-cert.sh "$(azd env get-value KEY_VAULT_NAME)" customer.com wildcard-customer-com
+
+# 3) Re-provision so the env binds the now-present cert:
+azd provision
+```
+
+> For production, replace the self-signed cert with a **CA-issued** wildcard cert (same import
+> command, point `-f` at your real PFX). The env auto-rotates when you import a new version because
+> the binding uses the **versionless** secret URL.
+
+If `ENABLE_CUSTOM_DNS_SUFFIX` is left `false` (default), none of the Key Vault / cert resources are
+created and the apps are reachable over plain HTTP at `appN.customer.com` as before.
+
 ## Credential handling — nothing secret in the repo
 
 - The VM password is **never** written to the repo. It flows in as the `WIN11_ADMIN_PASSWORD`
   environment variable (ideally sourced from 1Password with `op read`), which
   `main.parameters.json` binds to the `@secure()` `adminPassword` param.
+- The wildcard cert's PFX password is **randomly generated and discarded** by the cert-prep script
+  — it is never stored on disk or in the repo. The cert lives only in Key Vault.
 - `azd` stores environment state under `.azure/` — that directory is **git-ignored** and must
   stay that way (it can contain resolved values). Do not commit it.
-- ACR uses **no admin password**; image pulls are via managed identity + `AcrPull`.
+- ACR uses **no admin password**; image pulls are via managed identity + `AcrPull`. Key Vault is
+  **RBAC-only** (no access policies, no keys) — the MI reads the cert via role assignments.
 
 ## Network note (private ACR pull)
 

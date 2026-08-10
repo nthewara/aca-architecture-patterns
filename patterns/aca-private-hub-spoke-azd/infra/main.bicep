@@ -19,6 +19,9 @@ param adminUsername string = 'azureadmin'
 @description('Windows 11 VM admin password. Supplied by azd from the env (WIN11_ADMIN_PASSWORD -> adminPassword).')
 param adminPassword string
 
+@description('Enable the ACA env custom DNS suffix + wildcard TLS from Key Vault. The wildcard cert must be imported into the vault as a separate cert-prep step (see README).')
+param enableCustomDnsSuffix bool = false
+
 var namePrefix = 'aca${take(uniqueString(subscription().id, environmentName), 8)}'
 
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
@@ -37,6 +40,7 @@ module resources 'resources.bicep' = {
     namePrefix: namePrefix
     adminUsername: adminUsername
     adminPassword: adminPassword
+    enableCustomDnsSuffix: enableCustomDnsSuffix
   }
 }
 
@@ -50,3 +54,5 @@ output AZURE_RESOURCE_GROUP string = rg.name
 output FIREWALL_PUBLIC_IP string = resources.outputs.firewallPublicIp
 output RDP_CONNECT string = resources.outputs.rdpConnect
 output APP_FQDNS array = resources.outputs.appFqdns
+output CUSTOM_DNS_SUFFIX string = resources.outputs.customDnsSuffix
+output KEY_VAULT_NAME string = resources.outputs.keyVaultName
