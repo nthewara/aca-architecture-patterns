@@ -115,7 +115,7 @@ param adminUsername string = 'azureadmin'
 param adminPassword string
 
 @description('Windows 11 marketplace image SKU (e.g. win11-23h2-pro, win11-24h2-pro).')
-param win11ImageSku string = 'win11-23h2-pro'
+param win11ImageSku string = 'win11-24h2-pro'
 
 @description('Log Analytics retention in days.')
 param lawRetentionInDays int = 30
@@ -395,7 +395,9 @@ var firewallPrivateIp = firewall.properties.ipConfigurations[0].properties.priva
 // ===========================================================================
 // Route tables — force spoke egress through the firewall.
 //   0.0.0.0/0        -> VirtualAppliance (firewall private IP)
-//   168.63.129.16/32 -> Internet (keep Azure platform DNS / WireServer direct)
+//   0.0.0.0/0        -> VirtualAppliance (firewall private IP)
+//   (No explicit 168.63.129.16/32 route — Azure rejects routes into that
+//    restricted range; platform DNS / WireServer uses an implicit system route.)
 // ===========================================================================
 resource acaRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
   name: 'vnet-spoke-aca-${namePrefix}-rt'
@@ -411,22 +413,15 @@ resource acaRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
           nextHopIpAddress: firewallPrivateIp
         }
       }
-      {
-        name: 'azure-platform-dns-direct'
-        properties: {
-          addressPrefix: '168.63.129.16/32'
-          nextHopType: 'Internet'
-        }
-      }
     ]
   }
 }
 
 // MGMT spoke UDR: keep the DNAT return path symmetric.
-//   Force default egress to the firewall BUT keep the AzureFirewallSubnet reachable
-//   directly (168.63.129.16 direct as usual). This preserves the RDP DNAT return path
-//   because inbound RDP arrives from the firewall's private IP inside the hub, which is
-//   part of internalCidr and reachable via the peering, not the 0.0.0.0/0 route.
+//   Force default egress to the firewall. (No explicit 168.63.129.16/32 route —
+//   Azure rejects routes into that restricted range; platform DNS uses the implicit
+//   system route.) Inbound RDP arrives from the firewall's private IP inside the hub,
+//   which is part of internalCidr and reachable via the peering, not the default route.
 resource mgmtRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
   name: 'vnet-spoke-mgmt-${namePrefix}-rt'
   location: location
@@ -439,13 +434,6 @@ resource mgmtRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
           addressPrefix: '0.0.0.0/0'
           nextHopType: 'VirtualAppliance'
           nextHopIpAddress: firewallPrivateIp
-        }
-      }
-      {
-        name: 'azure-platform-dns-direct'
-        properties: {
-          addressPrefix: '168.63.129.16/32'
-          nextHopType: 'Internet'
         }
       }
     ]

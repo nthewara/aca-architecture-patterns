@@ -118,7 +118,7 @@ param adminUsername string = 'azureadmin'
 param adminPassword string
 
 @description('Windows 11 marketplace image SKU (e.g. win11-23h2-pro, win11-24h2-pro).')
-param win11ImageSku string = 'win11-23h2-pro'
+param win11ImageSku string = 'win11-24h2-pro'
 
 @description('Log Analytics retention in days.')
 param lawRetentionInDays int = 30
@@ -414,13 +414,6 @@ resource acaRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
           nextHopIpAddress: firewallPrivateIp
         }
       }
-      {
-        name: 'azure-platform-dns-direct'
-        properties: {
-          addressPrefix: '168.63.129.16/32'
-          nextHopType: 'Internet'
-        }
-      }
     ]
   }
 }
@@ -442,13 +435,6 @@ resource mgmtRouteTable 'Microsoft.Network/routeTables@2023-11-01' = {
           addressPrefix: '0.0.0.0/0'
           nextHopType: 'VirtualAppliance'
           nextHopIpAddress: firewallPrivateIp
-        }
-      }
-      {
-        name: 'azure-platform-dns-direct'
-        properties: {
-          addressPrefix: '168.63.129.16/32'
-          nextHopType: 'Internet'
         }
       }
     ]
