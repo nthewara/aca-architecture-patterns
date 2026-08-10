@@ -89,6 +89,9 @@ param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 @description('Container target port.')
 param targetPort int = 80
 
+@description('Ingress visibility for the apps. On an INTERNAL environment, external:true means VNet-scoped (reachable from peered VNets), NOT internet-facing. Set false only if the apps should be reachable exclusively from other apps in the same environment.')
+param appsExternalIngress bool = true
+
 @description('Container CPU cores.')
 param cpu string = '0.5'
 
@@ -627,8 +630,13 @@ resource apps 'Microsoft.App/containerApps@2024-03-01' = [
       workloadProfileName: workloadProfileName
       configuration: {
         ingress: {
-          // Private: internal ingress only — reachable only inside the VNet mesh.
-          external: false
+          // The ENVIRONMENT is internal (internal:true, publicNetworkAccess:Disabled),
+          // so "external" here is still PRIVATE — it means VNet-scoped (reachable from
+          // the whole VNet mesh / peered networks), NOT internet-facing. Internal-only
+          // ingress (external:false) is reachable ONLY from other apps in the same env,
+          // so a client in a peered VNet (e.g. the mgmt spoke VM) gets a 404 from the
+          // env proxy. Use external:true for cross-VNet access on an internal env.
+          external: appsExternalIngress
           targetPort: targetPort
           transport: 'auto'
           allowInsecure: false

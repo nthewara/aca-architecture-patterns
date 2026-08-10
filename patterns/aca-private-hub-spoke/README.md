@@ -155,9 +155,22 @@ See `main.bicepparam`. Key ones:
 - `customerDomain` — the emulated customer zone (default `customer.com`)
 - `adminUsername` / `adminPassword` (@secure) — Windows 11 VM login
 
+## Reaching the apps from another VNet (ingress visibility)
+
+> ⚠️ **Gotcha:** on an **internal** ACA environment, an app with `external: false` ingress is
+> reachable **only from other apps in the same environment**. A client in a *peered* VNet — like the
+> Windows 11 VM in the management spoke — will get an **HTTP 404 from the environment proxy** even
+> though DNS resolves and TLS terminates. The app FQDN also keeps an extra `.internal.` label.
+>
+> To reach the apps from the mgmt VM (or any peered network), the apps use **`external: true`**
+> (param `appsExternalIngress`, default `true`). Because the **environment** itself is internal
+> (`internal: true`, `publicNetworkAccess = Disabled`), this is **still fully private** — "external"
+> here means *VNet-scoped*, not internet-facing. There is no public IP on the apps.
+
 ## Everything is private (except the firewall + published RDP)
 
 - ACA environment is **internal** with `publicNetworkAccess = Disabled`.
-- All four container apps use **`external: false`** ingress.
+- The four container apps use **`external: true`** ingress — **VNet-scoped, not internet-facing**
+  (the internal env has no public data plane). This is what lets the mgmt-spoke VM reach them.
 - Windows 11 VM has **no public IP** — reachable only via the firewall DNAT.
 - The only public surface is the firewall's data/mgmt PIPs (mgmt required by the Basic SKU).
