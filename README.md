@@ -12,6 +12,7 @@ deployed into a lab subscription to demonstrate a specific networking / security
 |---------|---------|
 | [`aca-private-hub-spoke`](patterns/aca-private-hub-spoke/) | Fully private ACA on a dedicated workload profile in a hub-and-spoke topology. Four internal sample apps (`app1`–`app4`) resolvable at `appN.customer.com` via Azure Private DNS. All egress forced through an Azure Firewall (Basic SKU). A management spoke hosts a Windows 11 test VM reachable over RDP through a firewall DNAT rule. |
 | [`aca-private-hub-spoke-azd`](patterns/aca-private-hub-spoke-azd/) | Same topology, packaged for **Azure Developer CLI**. `azd up` provisions the infra **and** builds + deploys four real sample apps to the private ACA env. Adds ACR (Standard) + user-assigned managed identity with `AcrPull` for password-less image pulls (keys-disabled-tenant safe). |
+| [`aca-private-default-domain-azd`](patterns/aca-private-default-domain-azd/) | Same private topology + 4 apps + Win11 mgmt VM, but **no custom DNS and no custom certificate**. Apps are reached over the environment's auto-generated `*.azurecontainerapps.io` names with the **platform-managed, publicly-trusted TLS cert** (free). Simplest fully-private variant — no Key Vault, no cert lifecycle. |
 
 ---
 
